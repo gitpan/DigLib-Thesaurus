@@ -1,9 +1,10 @@
+%baselang PT
 %desc INST   Instance of
 %desc HAS    Has
 %desc BY     Made by
 %desc MAKES  It makes
 
-%norel URL SN
+%ext URL SN
 
 _top_
 NT  elemento urbano
@@ -19,6 +20,7 @@ desporto e lazer
 NT	orientação
 NT	trilhos
 NT	turismo
+
 
 turismo
 NT   quintas e solares

@@ -61,3 +61,9 @@ Revision history for Perl extension DigLib::Thesaurus.
 	- corrected bug on autocomplete function;
 	- top command added
 
+0.11  Fri Nov 02 08:32:99 2001
+	- Bug fixes
+	- Added some error handling when loading ISOs
+	- Type case maintained
+	- More structure for multi-lingue thesaurus
+	- Added some more tests

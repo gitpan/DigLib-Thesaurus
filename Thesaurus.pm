@@ -7,6 +7,8 @@ require Exporter;
 use Storable;
 use DigLib::MLang;
 
+use Data::Dumper;
+
 # Module Stuff
 our @ISA = qw(Exporter);
 our %EXPORT_TAGS = ( 'all' => [ qw() ] );
@@ -17,7 +19,7 @@ our @EXPORT = qw(&thesaurusLoad &thesaurusNew &thesaurusRetrieve
 our ($class,@terms,$term,$_corres );
 
 # Version
-our $VERSION = '0.10';
+our $VERSION = '0.11';
 
 # Multi-language stuff
 our $lang;
@@ -26,22 +28,34 @@ $INC{'DigLib/Thesaurus.pm'} =~ m!/Thesaurus\.pm$!;
 $lang = loadMLangFile("$`/Thesaurus.lang");
 $lang->setLanguage('pt');
 
+sub top_name {
+  my $self = shift;
+  return $self->{name};
+}
+
 sub terms {
-  my ($self,$term,@rels) = @_;
-  return map {if (exists($self->{thesaurus}->{$term}->{$_}))
-		{ @{$self->{thesaurus}->{$term}->{$_} }}
-	      else {()}} @rels;
+  my ($self, $term, @rels) = @_;
+  my $base = $self->{baselang};
+  $term = $self->definition($term);
+  return map {
+    if (exists($self->{$base}{$term}{$_})) {
+      @{$self->{$base}{$term}{$_}}
+    } else {
+      ()
+    }
+  } @rels;
 }
 
 sub external {
   my ($self,$term,$external) = @_;
   $external = uc($external);
-  return $self->{thesaurus}->{$term}->{$external};
+  $term = $self->definition($term);
+  return $self->{$self->{baselang}}{$term}{$external};
 }
 
 sub all_terms {
   my $self = shift;
-  return sort keys %{$self->{thesaurus}};
+  return sort keys %{$self->{$self->{baselang}}};
 }
 
 sub depth_first {
@@ -58,7 +72,10 @@ sub depth_first {
 }
 
 sub default_norelations {
-  return { 'URL'=> 1, 'SN' => 1 };
+  return {
+	  'URL'=> 1,
+	  'SN' => 1
+	 };
 }
 
 sub default_inversions {
@@ -72,23 +89,23 @@ sub default_inversions {
 
 sub translateTerm {
   my ($self,$term,$lang) = @_;
-  $term = lc($term);
+
   if ($lang) {
     my $trad;
     $lang = uc($lang);
     # Se foi $lang definido como linguagem
     if (defined($self->{languages}{$lang})) {
       # Se existe a tradução
-      if (defined($trad = $self->{thesaurus}{$term}{$lang})) {
+      if (defined($trad = $self->{$self->{baselang}}{$term}{$lang})) {
 	return $trad;
       } else {
-	return $self->{thesaurus}{$term}{_NAME_};
+	return $self->definition($term);
       }
     } else {
-      return $self->{thesaurus}{$term}{_NAME_};
+      return $self->definition($term);
     }
   } else {
-    return $self->{thesaurus}{$term}{_NAME_};
+    return $self->definition($term);
   }
 }
 
@@ -97,7 +114,7 @@ sub top {
   my $script = shift;
   return "<ul>".join("\n",
 		     map {"<li><a href=\"$script?t=$_\">$_</a></li>"}
-		     @{$self->{thesaurus}->{$self->{name}}->{NT}}). "</ul>";
+		     @{$self->{$self->{baselang}}->{$self->{name}}->{NT}}). "</ul>";
 }
 
 sub default_descriptions {
@@ -127,7 +144,10 @@ sub thesaurusNew {
 	     inverses => default_inversions(),
 	     descriptions => default_descriptions(),
 	     externals => default_norelations(),
+	     name => '_top_',
+	     baselang => '?',
 	     languages => {},
+	     version => $VERSION,
 	    };
 
   # bless and return it! Amen!
@@ -141,7 +161,11 @@ sub storeOn {
 sub thesaurusRetrieve {
   my $file = shift;
   my $obj = retrieve($file);
+  # if (defined($obj->{version})) {
   return $obj;
+  # } else {
+  # die("Rebuild your thesaurus with a recent DigLib::Thesaurus version");
+  # }
 }
 
 sub tr_url {
@@ -156,21 +180,25 @@ sub getHTMLTop {
   my $t = "<ul>";
   $t.=join("\n",
 	   map { "<li><a href=\"$script?t=" .tr_url($_). "\">$_</a></li>" }
-	   @{$self->{thesaurus}->{$self->{name}}->{NT}});
+	   @{$self->{$self->{baselang}}->{$self->{name}}->{NT}});
   $t .= "</ul>";
   return $t;
 }
 
 sub thesaurusLoad {
   my $file = shift;
+  my $self;
   my %thesaurus;
   my $invs = default_inversions();
   my $descs = default_descriptions();
   my $norels = default_norelations();
   my $name = "_top_";
+  my $baselang = "?";
   my $languages = {};
+  my $translations = {};
+  my $defineds = {};
 
-  # Open the thesaurus file to charge
+  # Open the thesaurus file to load
   open ISO, $file or die ($lang->get("cantopen"));
 
   # While we have commands or comments or empty lines, continue...
@@ -209,48 +237,74 @@ sub thesaurusLoad {
       }
 
     } elsif (/^%\s*top\s+(.*)$/) {
-      $name = $1;
+
+      $self->{name} = $1;
+
+    } elsif (/^%\s*baselang(uage)?\s+(\S+)/) {
+
+      $baselang = $2;
+
+    } elsif (/^%/) {
+
+      print STDERR "Unknown command: '$_'\n\n";
+
+    } else {
+      # It's a comment or an empty line: do nothing
     }
   }
 
   # Redefine the record separator
   my $old_sep = $/;
-  $/ = "\n\n";
+  $/ = "";
 
   # The last line wasn't a comment, a command or an empty line, so use it!
   $_ .= <ISO>;
 
+  my $ncommands = $.-1;
+
   # While there are definitions...
   do {
     # define local variables
-    my ($class,$term,$Term);
+    my ($class,$term);
 
     # The first line contains the term to be defined
     /(.*)\n/;
-    $Term = $1;
-    $term = lc($Term);
+    $term = $1;
 
-    $thesaurus{$term}{_NAME_} = $Term;
-
-    # The remaining are relations
-    $_ = $';
+    # If the term is all spaces, go back...
+    if ($term =~ /^\s+$/) {
+      print STDERR "Term with only spaces ignored at block term ",$.-$ncommands,"\n\n";
+      $term = '#zbr'; # This makes the next look think this is a comment and ignore it
+    }
 
     # Let's see if the term is commented...
     unless ($term =~ /^#/) {
+      $thesaurus{$term}{_NAME_} = $term;
+      $defineds->{defined}->{lc($term)}=$term;
+
+      # The remaining are relations
+      $_ = $';
+
       # OK! The term is *not* commented...
       # For each definition line...
-      while (/(([a-zA-Z]+)|#|)\s+(.*)\n/g) {
+      while (/(([^#\s]+)|#|)\s+(.*)\n/g) {
 	# Is it commented?
 	unless ($1 eq "#") {
 	  # it seems not... set the relation class
 	  $class = uc($1) || $class;
+
 	  # See if $class has a description
-	  $descs->{$class}=ucfirst(lc($class))  unless(defined($descs->{$class}));
-	  # divide the relation terms by , if not language or extern
-	  if (defined($norels->{$class}) || defined($languages->{$class})) {
+	  $descs->{$class}= ucfirst(lc($class))  unless(defined($descs->{$class}));
+
+	  # divide the relation terms by comma unless it is a language or extern relation
+	  if ( defined($norels->{$class}) ) {
+	    $thesaurus{$term}{$class}.= $3;
+	  } elsif (defined($languages->{$class})) {
+	    $translations->{$class}->{$3}.=$term;
+	    $defineds->{defined}->{lc($3)}=$term;
 	    $thesaurus{$term}{$class} = $3;
 	  } else {
-	    push(@{$thesaurus{$term}{$class}}, map {lc} split(/\s*,\s*/, $3));
+	    push(@{$thesaurus{$term}{$class}}, split(/\s*,\s*/, $3));
 	  }
 	}
       }
@@ -265,12 +319,17 @@ sub thesaurusLoad {
 
   # Define the Thesaurus object
   my $obj = {
-	     thesaurus => \%thesaurus,
+	     %$translations,
+	     %$defineds,
+	     $baselang => \%thesaurus,
 	     inverses => $invs,
 	     descriptions => $descs,
 	     externals => $norels,
-	     languages => $languages,
-	     name => $name,
+	     languages => {$baselang => 1,
+			   %{$languages}},
+	     baselang => $baselang,
+	     name => $self->{name},
+	     version => $VERSION,
 	    };
 
   # bless and return it! Amen!
@@ -300,7 +359,7 @@ sub save {
   my $file = shift;
   my ($term,$class);
 
-  my %thesaurus = %{$obj->{thesaurus}};
+  my %thesaurus = %{$obj->{$obj->{baselang}}};
   my %inverses = %{$obj->{inverses}};
   my %descs = %{$obj->{descriptions}};
 
@@ -340,7 +399,12 @@ sub save {
     $t.= "\n$thesaurus{$term}{_NAME_}\n";
     for $class ( keys %{$thesaurus{$term}} ) {
       next if $class eq "_NAME_";
-      $t.= "$class\t" . join(", ", @{$thesaurus{$term}->{$class}}) . "\n";
+      if(defined $obj->{externals}{$class} ||
+	 defined $obj->{languages}{$class}) {
+	$t.= "$class\t$thesaurus{$term}->{$class}\n";
+      } else {
+	$t.= "$class\t" . join(", ", @{$thesaurus{$term}->{$class}}) . "\n";
+      }
     }
   }
 
@@ -365,12 +429,21 @@ sub navigate {
   my $expander = $conf->{expand} || [];
   my $language = $conf->{lang} || undef;
   my %param = @_;
-  my $term = lc($param{t}) || lc($obj->{name}) || '_top_';
-  $term =~ s/\+/ /g;
+
+  my $term;
+  $param{t} =~ s/\+/ /g;
+  if ($obj->isdefined($param{t})) {
+    $term = $obj->{defined}{lc($param{t})};
+  } elsif ($obj->isdefined($obj->{name})) {
+    $term = $obj->{defined}{lc($obj->{name})};
+  } else {
+    $term = '_top_';
+  }
+
   my (@terms,$html);
 
   # If we don't have the term, return only the title
-  return "<h2>$term</h2>" unless (defined($obj->{thesaurus}{$term}));
+  return "<h2>$term</h2>" unless (defined($obj->{$obj->{baselang}}{$term}));
 
   # Make the page title
   $html = "<h2>".$obj->translateTerm($term,$language)."</h2>";
@@ -380,7 +453,7 @@ sub navigate {
 
   # Now print the relations
   my $rel;
-  for $rel (keys %{$obj->{thesaurus}{$term}}) {
+  for $rel (keys %{$obj->{$obj->{baselang}}{$term}}) {
     # next iteraction if the relation is the _NAME_
     next if ($rel eq "_NAME_");
 
@@ -390,7 +463,7 @@ sub navigate {
     # The externs exceptions...
     if (exists($norel{$rel})) {
       # It's an external, so, blockquote it!!
-      $html.= "<blockquote>$obj->{thesaurus}{$term}{$rel}</blockquote><br>";
+      $html.= "<blockquote>$obj->{$obj->{baselang}}{$term}{$rel}</blockquote><br>";
     } elsif (exists($obj->{languages}{$rel})) {
       ## This empty block is used for languages translations
     } else {
@@ -415,7 +488,7 @@ sub navigate {
 	$link =~ s/\s/+/g;
 	$term = $obj->translateTerm($term, $language);
 	"<a href=\"$script?t=$link\">$term</a>"
-      } @{$obj->{thesaurus}{$term}{$rel}});
+      } @{$obj->{$obj->{baselang}}{$term}{$rel}});
 
       $html.= "<br>";
     }
@@ -426,11 +499,12 @@ sub navigate {
   # Now, treat the expansion relations
   for $rel (@{$expander}) {
     $rel = uc($rel);
-    if (exists($obj->{thesaurus}{$term}{$rel})) {
-      @terms =  @{$obj->{thesaurus}{$term}{$rel}};
+    if (exists($obj->{$obj->{baselang}}{$term}{$rel})) {
+      @terms =  @{$obj->{$obj->{baselang}}{$term}{$rel}};
       $html.= "<ul><li>" .
-	join("</li><li>", map {thesaurusGetHTMLTerm($_, $obj, $script, $language)} @terms) .
-	  "</li></ul>";
+	join("</li><li>", 
+	     map {thesaurusGetHTMLTerm($_, $obj, $script, $language)} @terms) .
+	       "</li></ul>";
     }
   }
   return $html;
@@ -469,7 +543,7 @@ sub toTex{
 
 sub dumpHTML {
   my $obj = shift;
-  my %thesaurus = %{$obj->{thesaurus}};
+  my %thesaurus = %{$obj->{$obj->{baselang}}};
   my $t = "";
   for (keys %thesaurus) {
     $t.=thesaurusGetHTMLTerm($_,$obj);
@@ -480,8 +554,8 @@ sub dumpHTML {
 
 sub relations {
   my ($self,$term) = @_;
-  $term = lc($term);
-  return sort keys %{$self->{thesaurus}->{$term}}
+
+  return sort keys %{$self->{$self->{baselang}}->{$term}}
 }
 
 # Given a term, return it's information (second level for navigate)
@@ -489,14 +563,12 @@ sub thesaurusGetHTMLTerm {
   my ($term,$obj,$script,$language) = @_;
 
   # Put thesaurus and descriptions on handy variables
-  my %thesaurus = %{$obj->{thesaurus}};
+  my %thesaurus = %{$obj->{$obj->{baselang}}};
   my %descs = %{$obj->{descriptions}};
 
-  # Set the term to lower case
-  $term = lc($term);
-
   # Check if the term exists in the thesaurus
-  if (exists($thesaurus{$term})) {
+  if ($obj->isdefined($term)) {
+    $term = $obj->{defined}{lc($term)};
     my ($c,$t,$tterm);
     my $link = $term;
 
@@ -511,7 +583,7 @@ sub thesaurusGetHTMLTerm {
 
       if (exists($obj->{externals}{$c})) {
 	# put an external relation
-	$t.= "<blockquote>$thesaurus{$term}{$c}</blockquote><br>";
+	$t.= "<div$thesaurus{$term}{$c}</div>";
       } elsif (exists($obj->{languages}{$c})) {
 	# Jump the language relations
       } else {
@@ -536,299 +608,114 @@ sub thesaurusGetHTMLTerm {
     }
     $t.= "</ul></small>\n";
     return $t;
-  }
-  else {
+  } else {
     return $lang->str("[tnothere]\n");
   }
 }
 
+sub isdefined {
+  my $obj = shift;
+  my $term = lc(shift);
+  return defined($obj->{defined}{$term});
+}
+
+sub definition {
+  my ($self,$term) = @_;
+  return $self->{defined}{lc($term)};
+}
+
 sub complete {
   my $obj = shift;
-  my %thesaurus = %{$obj->{thesaurus}};
+  my %thesaurus = %{$obj->{$obj->{baselang}}};
   my %inverses = %{$obj->{inverses}};
   my ($termo,$classe);
 
   # para cada termo
   for $termo (keys %thesaurus) {
+    # $obj->{defined}{lc($termo)} = $termo;
     # e para cada classe,
     for $classe (keys %{$thesaurus{$termo}}) {
       # se tiver inverso,
       if (defined($inverses{$classe})) {
 	# completar cada um dos termos relacionados
 	for (@{$thesaurus{$termo}{$classe}}) {
-	  %thesaurus = completa(lc($_),$inverses{$classe},lc($termo),%thesaurus);
+	  %thesaurus = completa($obj,$_,$inverses{$classe},$termo,%thesaurus);
 	}
       }
     }
   }
 
-  $obj -> {thesaurus} = \%thesaurus;
+  $obj -> {$obj->{baselang}} = \%thesaurus;
   return $obj;
 }
 
 sub completa {
-  my ($palavra,$classe,$termo,%thesaurus) = @_;
+  ## Yeah, obj and thesaurus can be redundanct, but it's better this way...
+  my ($obj,$palavra,$classe,$termo,%thesaurus) = @_;
+  my $t;
 
   # Ver se existe a palavra e a classe no thesaurus
-  if (defined($thesaurus{$palavra}) && defined($thesaurus{$palavra}{$classe})) {
-    # se existe, o array palavras fica com os termos (para ver se ja' existe)
-    my @palavras = @{$thesaurus{$palavra}{$classe}};
-    # ver se ja' existe
-    for (@palavras) {
-      return %thesaurus if (lc eq $termo);
+  if ($obj->isdefined($palavra)) {
+    $t = $obj->{defined}{lc($palavra)};
+    if (defined($thesaurus{$t}{$classe})) {
+      # se existe, o array palavras fica com os termos (para ver se ja' existe)
+      my @palavras = @{$thesaurus{$t}{$classe}};
+      # ver se ja' existe
+      for (@palavras) {
+	return %thesaurus if (lc eq lc($termo));
+      }
     }
     # nao existe: aumentar
-    push @{$thesaurus{$palavra}{$classe}}, $termo;
+    push @{$thesaurus{$t}{$classe}}, $obj->{defined}{lc($termo)};
   } else {
     # nao existe: aumentar
-    $thesaurus{$palavra}{_NAME_} = ucfirst($palavra) unless defined($thesaurus{$palavra}{_NAME_});
-    push @{$thesaurus{$palavra}{$classe}}, $termo;
+    $thesaurus{$palavra}{_NAME_} = $palavra unless
+      defined($thesaurus{$palavra}) && defined($thesaurus{$palavra}{_NAME_});
+    $obj->{defined}{lc($palavra)} = $palavra;
+    push @{$thesaurus{$palavra}{$classe}}, $obj->{defined}{lc($termo)};
   }
   return %thesaurus;
 }
 
 sub addTerm {
   my $obj = shift;
-  my $Term = shift;
-  my $term = lc($Term);
+  my $term = shift;
 
-  $obj->{thesaurus}->{$term}->{_NAME_} = $Term;
+  $obj->{$obj->{baselang}}{$term}{_NAME_} = $term;
+  $obj->{defined}{lc($term)} = $term;
 }
 
 sub addRelation {
   my $obj = shift;
-  my $term = lc(shift);
+  my $term = shift; #lc(shift);
   my $rel = uc(shift);
   my @terms = @_;
   $obj->{descriptions}->{$rel}="..." unless(defined($obj->{descriptions}->{$rel}));
-  push @{$obj->{thesaurus}->{$term}->{$rel}}, @terms;
+  push @{$obj->{$obj->{baselang}}->{$term}->{$rel}}, @terms;
 }
 
 sub deleteTerm {
   my $obj = shift;
-  my $term = lc(shift);
+  my $term = shift; #lc(shift);
   my ($t,$c);
 
-  delete($obj->{thesaurus}->{$term});
-  foreach $t (keys %{$obj->{thesaurus}}) {
-    foreach $c (keys %{$obj->{thesaurus}->{$t}}) {
+  delete($obj->{$obj->{baselang}}->{$term});
+  foreach $t (keys %{$obj->{$obj->{baselang}}}) {
+    foreach $c (keys %{$obj->{$obj->{baselang}}->{$t}}) {
       my @a;
-      foreach (@{$obj->{thesaurus}->{$t}->{$c}}) {
-	push @a,$_ unless(lc($_) eq $term);
+      foreach (@{$obj->{$obj->{baselang}}->{$t}->{$c}}) {
+	push @a,$_ unless($_ eq $term);
       }
-      $obj->{thesaurus}->{$t}->{$c}=\@a;
+      $obj->{$obj->{baselang}}->{$t}->{$c}=\@a;
     }
   }
 }
 
-#  sub edit {
-#    my $obj = shift;
-#    my $file = shift;
-#    my %param = @_;
-#    my $html = "";
-#    if (%param) {
-#      if ($param{comando} eq "introduzir") {
-#        if (defined($param{termo})) {
-#  	$obj -> addTerm($param{termo});
-#  	for (keys %param) {
-#  	  if (/terms(\d)/) {
-#  	    if ($param{$_}) {
-#  	      $obj->addRelation($param{termo},$param{"rel$1"},
-#  					 split(/\s*,\s*/,$param{$_}));
-#  	    }
-#  	  }
-#  	}
-#  	$obj->storeOn($file);
-#  	$html.=$lang->str("<center><table cellpadding=\"10\" border=\"1\"><tr><td><h2>[saved]</h2></td></tr></table></center>");
-#        } else {
-#  	$html.= $lang->str("<center><h2>[insert]</h2><table cellpadding=\"10\" border=\"1\"><tr><td>");
-#  	my $ops = join "\n",
-#  	  map {"<option value=\"$_\">$_"} (keys %{$obj->{descriptions}});
-#  	$html.= "<FORM METHOD=\"POST\"  ENCTYPE=\"application/x-www-form-urlencoded\">";
-#  	$html.= "<center><table border=\"0\">";
-
-#  	$html.= $lang->str("<tr><td valign=\"top\"><b>[term]</b></td>");
-#  	$html.= "    <td><input name=\"termo\"></td></tr>";
-
-#  	$html.= $lang->str("<tr><td colspan=\"2\"><b>[rels]</b></td>");
-
-#  	$html.= "<tr><td align=\"right\"><select name=\"rel1\">$ops</select></td>";
-#  	$html.= "    <td><input name=\"terms1\" size=\"40\"></td></tr>";
-#  	$html.= "<tr><td align=\"right\"><select name=\"rel2\">$ops</select></td>";
-#  	$html.= "    <td><input name=\"terms2\" size=\"40\"></td></tr>";
-#  	$html.= "<tr><td align=\"right\"><select name=\"rel3\">$ops</select></td>";
-#  	$html.= "    <td><input name=\"terms3\" size=\"40\"></td></tr>";
-#  	$html.= "<tr><td align=\"right\"><select name=\"rel4\">$ops</select></td>";
-#  	$html.= "    <td><input name=\"terms4\" size=\"40\"></td></tr>";
-
-#  	$html.= "<tr><td><input name=\"rel5\" size=\"8\"></td>";
-#  	$html.= "    <td><input name=\"terms5\" size=\"40\"></td></tr>";
-#  	$html.= "<tr><td><input name=\"rel6\" size=\"8\"></td>";
-#  	$html.= "    <td><input name=\"terms6\" size=\"40\"></td></tr>";
-
-#  	$html.= "<tr><td colspan=\"2\"><hr></td></tr>";
-#  	$html.= "<tr><td colspan=\"2\" align=\"right\">";
-#  	$html.= "<input type=\"hidden\" name=\"comando\" value=\"introduzir\">";
-#  	$html.= $lang->str("<input type=\"submit\" value=\" [ok] \"></td></tr>");
-
-#  	$html.= "</table></center>";
-#  	$html.= "</FORM>";
-#  	$html.= "</td></tr></table></center>";
-#        }
-#      } elsif ($param{comando} eq "apagar") {
-#        if (defined($param{termo})) {
-#  	$obj -> deleteTerm($param{termo});
-#  	$obj -> storeOn($file);
-#  	$html.=$lang->str("<center><table cellpadding=\"10\" border=\"1\"><tr><td><h2>[deleted]</h2></td></tr></table></center>");
-#        } else {
-#  	$html.= $lang->str("<center><h2>[delete]</h2><table cellpadding=\"10\" border=\"1\"><tr><td>");
-#  	$html.= "<FORM METHOD=\"POST\"  ENCTYPE=\"application/x-www-form-urlencoded\">";
-#  	$html.= "<center><table border=\"0\">";
-
-#  	$html.= $lang->str("<tr><td valign=\"top\"><b>[termtodel]&nbsp;</b></td>");
-#  	$html.= "    <td><input name=\"termo\"></td></tr>";
-
-#  	$html.= "<tr><td colspan=\"2\"><hr></td></tr>";
-#  	$html.= "<tr><td colspan=\"2\" align=\"right\">";
-#  	$html.= "<input type=\"hidden\" name=\"comando\" value=\"apagar\">";
-#  	$html.= $lang->str("<input type=\"submit\" value=\" [ok] \"></td></tr>");
-
-#  	$html.= "</table></center>";
-#  	$html.= "</FORM>";
-#  	$html.= "</td></tr></table></center>";
-#        }
-#      } elsif ($param{comando} eq "descrever") {
-#        if (defined($param{rel})) {
-#  	$obj->describe($param{rel},$param{desc});
-#  	$obj->storeOn($file);
-#  	$html.="<center><table cellpadding=\"10\" border=\"1\"><tr><td><h2>";
-#  	$html.=$lang->str("[saved]</h2></td></tr></table></center>");
-#        } else {
-#  	$html.= $lang->str("<center><h2>[descrel]</h2><table cellpadding=\"10\" border=\"1\"><tr><td>");
-#  	$html.= "<FORM METHOD=\"POST\"  ENCTYPE=\"application/x-www-form-urlencoded\">";
-#  	$html.= "<center><table border=\"0\">";
-
-#  	$html.= $lang->str("<tr><td valign=\"top\"><b>[rel]:</b></td>");
-#  	$html.= "    <td><input name=\"rel\"></td></tr>";
-#  	$html.= $lang->str("<tr><td valign=\"top\"><b>[desc]:&nbsp;</b></td>");
-#  	$html.= "    <td><input name=\"desc\"></td></tr>";
-
-#  	$html.= "<tr><td colspan=\"2\"><hr></td></tr>";
-#  	$html.= "<tr><td colspan=\"2\" align=\"right\">";
-#  	$html.= "<input type=\"hidden\" name=\"comando\" value=\"descrever\">";
-#  	$html.= $lang->str("<input type=\"submit\" value=\" [ok] \"></td></tr>");
-
-#  	$html.= "</table></center>";
-#  	$html.= "</FORM>";
-#  	$html.= "</td></tr></table></center>";
-
-#        }
-#      } elsif ($param{comando} eq "inversos") {
-#        if (defined($param{a})) {
-#  	$obj->addInverse($param{a},$param{b});
-#  	$obj->storeOn($file);
-#  	$html.="<center><table cellpadding=\"10\" border=\"1\"><tr><td><h2>";
-#  	$html.=$lang->str("[saved]</h2></td></tr></table></center>");
-#        } else {
-#  	$html.=$lang->str("<center><h2>[descinv]</h2><table cellpadding=\"10\" border=\"1\"><tr><td>");
-#  	$html.= "<FORM METHOD=\"POST\"  ENCTYPE=\"application/x-www-form-urlencoded\">";
-#  	$html.= "<center><table border=\"0\">";
-
-#  	$html.= $lang->str("<tr><td valign=\"top\"><b>[rel] A</b></td>");
-#  	$html.= "    <td><input name=\"a\"></td></tr>";
-#  	$html.= $lang->str("<tr><td valign=\"top\"><b>[rel] B</b></td>");
-#  	$html.= "    <td><input name=\"b\"></td></tr>";
-
-#  	$html.= "<tr><td colspan=\"2\"><hr></td></tr>";
-#  	$html.= "<tr><td colspan=\"2\" align=\"right\">";
-#  	$html.= "<input type=\"hidden\" name=\"comando\" value=\"inversos\">";
-#  	$html.= $lang->str("<input type=\"submit\" value=\" [ok] \"></td></tr>");
-
-#  	$html.= "</table></center>";
-#  	$html.= "</FORM>";
-#  	$html.= "</td></tr></table></center>";
-#        }
-#      } elsif ($param{comando} eq "completar") {
-#        $obj -> complete();
-#        $obj -> storeOn($file);
-#        $html.="<center><table cellpadding=\"10\" border=\"1\"><tr><td><h2>";
-#        $html.=$lang->str("[ok]</h2></td></tr></table></center>");
-#      } elsif ($param{comando} eq "iso") {
-#        if (defined($param{file})) {
-#  	if ($obj -> save($param{file})) {
-#  	  $html.="<center><table cellpadding=\"10\" border=\"1\"><tr><td><h2>";
-#  	  $html.=$lang->str("[saved]</h2></td></tr></table></center>");
-#  	} else {
-#  	  $html.="<center><table cellpadding=\"10\" border=\"1\"><tr><td align=\"center\"><h2>";
-#  	  $html.=$lang->str("[error]</h2>[cant]</td></tr></table></center>");
-#  	}
-#        } else {
-#  	$html.= $lang->str("<center><h2>[saviso]</h2><table cellpadding=\"10\" border=\"1\"><tr><td>");
-#  	$html.= "<FORM METHOD=\"POST\"  ENCTYPE=\"application/x-www-form-urlencoded\">";
-#  	$html.= "<center><table border=\"0\">";
-
-#  	$html.= $lang->str("<tr><td valign=\"top\"><b>[file]:</b></td>");
-#  	$html.= "    <td><input name=\"file\"></td></tr>";
-
-#  	$html.= "<tr><td colspan=\"2\"><hr></td></tr>";
-#  	$html.= "<tr><td colspan=\"2\" align=\"right\">";
-#  	$html.= "<input type=\"hidden\" name=\"comando\" value=\"iso\">";
-#  	$html.= $lang->str("<input type=\"submit\" value=\" [ok] \"></td></tr>");
-
-#  	$html.= "</table></center>";
-#  	$html.= "</FORM>";
-#  	$html.= "</td></tr></table></center>";
-#        }
-#      }
-#    }
-
-#    $html.= $lang->str("<center><h2>[index]</h2><table border=\"1\" cellpadding=\"10\"><tr><td><table>");
-
-#    $html.= $lang->str("<tr><td><b>[insert]</b></td><td>");
-#    $html.= "<FORM METHOD=\"POST\"  ENCTYPE=\"application/x-www-form-urlencoded\">";
-#    $html.= "<input type=\"submit\" value=\" >>> \">";
-#    $html.= "<input type=\"hidden\" name=\"comando\" value=\"introduzir\">";
-#    $html.= "</FORM></td></tr>";
-
-#    $html.= $lang->str("<tr><td><b>[delete]</b></td><td>");
-#    $html.= "<FORM METHOD=\"POST\"  ENCTYPE=\"application/x-www-form-urlencoded\">";
-#    $html.= "<input type=\"submit\" value=\" >>> \">";
-#    $html.= "<input type=\"hidden\" name=\"comando\" value=\"apagar\">";
-#    $html.= "</FORM></td></tr>";
-
-#    $html.= $lang->str("<tr><td><b>[descrel]</b></td><td>");
-#    $html.= "<FORM METHOD=\"POST\"  ENCTYPE=\"application/x-www-form-urlencoded\">";
-#    $html.= "<input type=\"submit\" value=\" >>> \">";
-#    $html.= "<input type=\"hidden\" name=\"comando\" value=\"descrever\">";
-#    $html.= "</FORM></td></tr>";
-
-#    $html.= $lang->str("<tr><td><b>[descinv]</b></td><td>");
-#    $html.= "<FORM METHOD=\"POST\"  ENCTYPE=\"application/x-www-form-urlencoded\">";
-#    $html.= "<input type=\"submit\" value=\" >>> \">";
-#    $html.= "<input type=\"hidden\" name=\"comando\" value=\"inversos\">";
-#    $html.= "</FORM></td></tr>";
-
-#    $html.= $lang->str("<tr><td><b>[saviso]</b></td><td>");
-#    $html.= "<FORM METHOD=\"POST\"  ENCTYPE=\"application/x-www-form-urlencoded\">";
-#    $html.= "<input type=\"submit\" value=\" >>> \">";
-#    $html.= "<input type=\"hidden\" name=\"comando\" value=\"iso\">";
-#    $html.= "</FORM></td></tr>";
-
-#    $html.= $lang->str("<tr><td><b>[autocomplete]</b></td><td>");
-#    $html.= "<FORM METHOD=\"POST\"  ENCTYPE=\"application/x-www-form-urlencoded\">";
-#    $html.= "<input type=\"submit\" value=\" >>> \">";
-#    $html.= "<input type=\"hidden\" name=\"comando\" value=\"completar\">";
-#    $html.= "</FORM></td></tr>";
 
 
-#    $html.= "</table></td></tr></table></center>";
-#    return $html;
-#  }
-
-use Data::Dumper;
 sub dt {
   my $self = shift;
-  my $t = lc(shift);
+  my $t = shift; #lc(shift);
   my %handler = @_;
   my $c;
   my $r = "";
@@ -836,7 +723,7 @@ sub dt {
   if (defined( $handler{"_NAME_"})){
     $r .=  &{$handler{"_NAME_"}};
   }
-  for $c (keys %{$self->{thesaurus}->{$t}}) {
+  for $c (keys %{$self->{$self->{baselang}}->{$t}}) {
     next if ($c eq "_NAME_");
 
     # Set environment variables to dt function
@@ -849,9 +736,9 @@ sub dt {
     #
       if ($self->{externals}->{$class} ||
 	  $self->{languages}->{$class}) {
-        @terms = ( $self->{thesaurus}{$t}{$class} );
+        @terms = ( $self->{$self->{baselang}}{$t}{$class} );
       } else {
-        @terms = @{$self->{thesaurus}{$t}{$class}};
+        @terms = @{$self->{$self->{baselang}}{$t}{$class}};
       }
 
     #
@@ -873,23 +760,25 @@ sub full_dt {
   my %h = @_;
   my $t;
   my $r="";
-  for $t (sort keys %{$self->{thesaurus}}) {
+  for $t (sort keys %{$self->{$self->{baselang}}}) {
     $r .= $self->dt($t,%h);
   }
   $r
 }
 
-sub tc{  my %x= tc_aux(@_);
-         keys %x;
+sub tc{
+  # @_ == ($self,$term,@relations)
+  my %x = tc_aux(@_);
+  return keys %x;
 }
 
 sub tc_aux {
-        my ($self,$term,@relat) = @_;
-        my %r=($term => 1 );
-        for ($self->terms($term,@relat)) {
-             %r=(%r, $_ => 1,  tc_aux($self,$_,@relat)) unless $r{$_};;
-        }
-        %r;
+  my ($self,$term,@relat) = @_;
+  my %r = ( $term => 1 );
+  for ($self->terms($term,@relat)) {
+    %r = (%r, $_ => 1,  tc_aux($self,$_,@relat)) unless $r{$_};
+  }
+  return %r;
 }
 
 1;
@@ -1110,6 +999,19 @@ of these lines:
 
 To describe (legend) the language names, you should use the B<description>
 command, so, you could append:
+
+  %description PT Portuguese
+  %description EN English
+  %description FR French
+
+=item B<baselang>uage
+
+This one makes it possible to explicitly name the base language for the
+thesaurus. This command should be used with the C<description> one, to
+describe the language name. Here is a simple example:
+
+  %baselang PT
+  %languages EN FR
 
   %description PT Portuguese
   %description EN English
