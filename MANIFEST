@@ -1,0 +1,11 @@
+INSTALL
+Changes
+Makefile.PL
+Thesaurus.pm
+test.pl
+MANIFEST
+lib/DigLib/Thesaurus.lang
+examples/thesaurus
+examples/animal.the
+examples/example.pl
+README

@@ -1,0 +1,13 @@
+%languages EN
+%desc[EN] NT Narrower Term
+%desc[EN] BT Broader Term
+
+_top_
+NT animal
+
+animal
+NT gato
+EN animal
+
+gato
+EN cat
